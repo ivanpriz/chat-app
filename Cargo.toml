@@ -1,0 +1,9 @@
+[package]
+name = "chatapp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.7.5", features = ["ws"] }
+axum-extra = { version = "0.9.3", features = ["typed-header"] }
+tokio = { version = "1.38.0", features = ["rt-multi-thread"] }
