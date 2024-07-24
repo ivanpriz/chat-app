@@ -6,4 +6,5 @@ edition = "2021"
 [dependencies]
 axum = { version = "0.7.5", features = ["ws"] }
 axum-extra = { version = "0.9.3", features = ["typed-header"] }
+futures-util = "0.3.30"
 tokio = { version = "1.38.0", features = ["rt-multi-thread"] }

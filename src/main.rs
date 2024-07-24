@@ -14,7 +14,9 @@ use axum_extra::{
     headers::{self, SecWebsocketKey},
     TypedHeader,
 };
-use tokio::sync::broadcast;
+use futures_util::SinkExt;
+use futures_util::StreamExt;
+use tokio::sync::{broadcast, RwLock};
 
 #[tokio::main]
 async fn main() {
@@ -78,9 +80,42 @@ pub struct AppState {
 }
 
 async fn handle_socket(mut socket: WebSocket, user_id: String) {
-    if let Some(msg) = socket.recv().await {
+    let (mut sender, mut receiver) = socket.split();
+    // Spawn the first task that will receive broadcast messages and send text
+    // messages over the websocket to our client.
+    let sender = Arc::new(RwLock::new(sender));
+    let sender_pong = Arc::clone(&sender);
+    let mut send_task = tokio::spawn(async move {
+        loop {
+            // In any websocket error, break loop.
+            if sender_pong
+                .blocking_write()
+                .send(Message::Text(String::from("Pong from server")))
+                .await
+                .is_err()
+            {
+                break;
+            } else {
+                tokio::time::sleep(tokio::time::Duration::from_secs_f32(0.2)).await;
+                println!("Pong sent succesfully");
+            }
+        }
+    });
+
+    while let Some(msg) = receiver.next().await {
         match msg {
-            Ok(message) => println!("{:?}", message),
+            Ok(message) => {
+                let new_msg = message
+                    .to_text()
+                    .expect("Cant parse text from message")
+                    .to_string();
+                sender
+                    .blocking_write()
+                    .send(Message::from(new_msg))
+                    .await
+                    .expect("Unable to send message back");
+                println!("{:?}", message)
+            }
             Err(e) => println!("Client disconnected with err {:?}", e),
         }
     }
