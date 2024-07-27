@@ -1,4 +1,9 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::format,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 
 use axum::{
     extract::{
@@ -21,7 +26,10 @@ use tokio::sync::{broadcast, RwLock};
 #[tokio::main]
 async fn main() {
     let (tx, _rx) = broadcast::channel(100);
-    let app_state = Arc::new(AppState { tx });
+    let app_state = Arc::new(AppState {
+        user_set: Mutex::new(HashSet::new()),
+        tx,
+    });
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .with_state(app_state);
@@ -40,6 +48,11 @@ async fn main() {
 
 fn auth_user(auth_header: Option<&HeaderValue>) -> String {
     return "user_id".into();
+}
+
+pub struct AppState {
+    tx: broadcast::Sender<String>,
+    user_set: Mutex<HashSet<String>>,
 }
 
 async fn ws_handler(
@@ -63,60 +76,56 @@ async fn ws_handler(
     // By this user id we can get all the rooms the user is at.
     // let user_id = auth_user(sec_websocket_protocol);
     ws.protocols([sec_websocket_protocol])
-        .on_upgrade(move |socket| handle_socket(socket, String::from("userId123")))
+        .on_upgrade(move |socket| handle_socket(socket, String::from("userId123"), state))
 }
 
-// In this struct we store what streams each user connection should listen to.
-// We listen to stream, and when we get new message, it has room id in it.
-// We store all users/connections belonging to this room in this struct and
-// route the message to them.
-pub struct ChatRoomStreamsService {
-    user_id_to_rooms_ids_map: HashMap<String, Vec<String>>,
-    room_id_to_user_ids_map: HashMap<String, Vec<String>>,
+fn check_username(state: &AppState, string: &mut String, name: &str) {
+    let mut user_set = state.user_set.lock().unwrap();
+
+    if !user_set.contains(name) {
+        user_set.insert(name.to_owned());
+
+        string.push_str(name);
+    }
 }
 
-pub struct AppState {
-    tx: broadcast::Sender<String>,
-}
-
-async fn handle_socket(mut socket: WebSocket, user_id: String) {
+async fn handle_socket(mut socket: WebSocket, user_id: String, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
-    // Spawn the first task that will receive broadcast messages and send text
-    // messages over the websocket to our client.
-    let sender = Arc::new(RwLock::new(sender));
-    let sender_pong = Arc::clone(&sender);
+
+    let mut rx = state.tx.subscribe();
+
+    let msg = format!("{user_id} joined.");
+    println!("{}", msg);
+    let _ = state.tx.send(msg);
+
     let mut send_task = tokio::spawn(async move {
-        loop {
-            // In any websocket error, break loop.
-            if sender_pong
-                .blocking_write()
-                .send(Message::Text(String::from("Pong from server")))
-                .await
-                .is_err()
-            {
+        while let Ok(msg) = rx.recv().await {
+            if sender.send(Message::Text(msg)).await.is_err() {
                 break;
-            } else {
-                tokio::time::sleep(tokio::time::Duration::from_secs_f32(0.2)).await;
-                println!("Pong sent succesfully");
             }
         }
     });
 
-    while let Some(msg) = receiver.next().await {
-        match msg {
-            Ok(message) => {
-                let new_msg = message
-                    .to_text()
-                    .expect("Cant parse text from message")
-                    .to_string();
-                sender
-                    .blocking_write()
-                    .send(Message::from(new_msg))
-                    .await
-                    .expect("Unable to send message back");
-                println!("{:?}", message)
-            }
-            Err(e) => println!("Client disconnected with err {:?}", e),
+    let mut tx = state.tx.clone();
+    let id_clone = user_id.clone();
+
+    let mut recv_task = tokio::spawn(async move {
+        while let Some(Ok(Message::Text(text))) = receiver.next().await {
+            println!("Received {} from user {}.", text, user_id);
+            let _ = tx.send(format!("{user_id}: {text}"));
         }
-    }
+    });
+
+    // If any of the task completes, we abort the other (why?)
+    tokio::select! {
+        _ = &mut send_task => recv_task.abort(),
+        _ = &mut recv_task => send_task.abort(),
+    };
+
+    // Send user left
+    let msg = format!("{id_clone} left");
+    println!("{}", msg);
+    let _ = state.tx.send(msg);
+
+    state.user_set.lock().unwrap().remove(&id_clone);
 }
