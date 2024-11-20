@@ -1,3 +1,5 @@
+// mod consumer;
+
 use std::{
     collections::{HashMap, HashSet},
     fmt::format,
@@ -116,7 +118,7 @@ async fn handle_socket(mut socket: WebSocket, user_id: String, state: Arc<AppSta
         }
     });
 
-    // If any of the task completes, we abort the other (why?)
+    // If any of the task completes, we abort the other (why? cuz looks like they finish only on errors when sending/receiving)
     tokio::select! {
         _ = &mut send_task => recv_task.abort(),
         _ = &mut recv_task => send_task.abort(),
